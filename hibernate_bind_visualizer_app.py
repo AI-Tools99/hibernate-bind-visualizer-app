@@ -120,6 +120,9 @@ def parse_logs(text: str) -> Tuple[List[Parameter], List[str]]:
 def normalize(param: Parameter, diagnostics: List[str], expand_in: bool) -> None:
     typ = param["type"]
     val = param["original"]
+    if val.lower() == "null":
+        param["normalized"] = "NULL"
+        return
     if typ in BOOLEAN_TYPES:
         v = val.lower()
         if v == "true":
