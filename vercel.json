@@ -1,8 +1,0 @@
-{
-  "builds": [
-    { "src": "hibernate_bind_visualizer_app.py", "use": "@vercel/python" }
-  ],
-  "routes": [
-    { "src": "/(.*)", "dest": "hibernate_bind_visualizer_app.py" }
-  ]
-}
