@@ -9,7 +9,19 @@ This module serves two purposes:
 """
 
 from pathlib import Path
-from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+try:
+    # Streamlit 1.25+ exposes ``get_script_run_ctx`` which lets us detect
+    # whether ``streamlit run`` is managing the execution context.  Older
+    # versions do not provide this utility, so fall back to a no-op that
+    # mimics the absence of a running context.  Without this guard, attempting
+    # to import from ``streamlit.runtime.scriptrunner`` on such versions raises
+    # an ``ImportError`` which prevents the app from starting and surfaces as a
+    # 404 to end users.
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+except Exception:  # pragma: no cover - defensive for older Streamlit releases
+    def get_script_run_ctx() -> None:  # type: ignore
+        return None
 
 
 def _bootstrap() -> None:
