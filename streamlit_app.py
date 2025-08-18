@@ -9,6 +9,7 @@ This module serves two purposes:
 """
 
 from pathlib import Path
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 
 def _bootstrap() -> None:
@@ -22,11 +23,17 @@ def _bootstrap() -> None:
     bootstrap.run(str(app_path), False, [], {})
 
 
-if __name__ == "__main__":
-    _bootstrap()
-else:
-    # Streamlit imports the file as a module when running via ``streamlit run``.
-    # Import and render the application in that case.
+def _render() -> None:
+    """Render the app when running via ``streamlit run``."""
+
     from hibernate_bind_visualizer_app import main as render
 
     render()
+
+
+if __name__ == "__main__" and get_script_run_ctx() is None:
+    _bootstrap()
+else:
+    # When executed with ``streamlit run`` there is already a running context,
+    # so simply render the application.
+    _render()
