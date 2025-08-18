@@ -1,10 +1,25 @@
+"""Streamlit-based Hibernate Bind Visualizer.
+
+This app parses Hibernate TRACE logs and binds parameters into the
+corresponding SQL query.  The parsing logic is largely unchanged from the
+previous Flask implementation, but the UI has been redesigned with Streamlit
+to provide a modern, responsive dashboard with light/dark theming.
+"""
+
 from __future__ import annotations
 
+import json
 import re
 from typing import List, Tuple
-from flask import Flask, request, render_template_string, Response
 
-app = Flask(__name__)
+import pandas as pd
+import streamlit as st
+import streamlit.components.v1 as components
+
+
+# ---------------------------------------------------------------------------
+# Example data
+# ---------------------------------------------------------------------------
 
 EXAMPLE_SQL = """select
     e2_0."event_id",
@@ -58,17 +73,26 @@ EXAMPLE_LOGS = """{"message":"binding parameter [1] as [BOOLEAN] - [true]"}
 {"message":"binding parameter [11] as [INTEGER] - [0]"}
 {"message":"binding parameter [12] as [INTEGER] - [50]"}"""
 
+
+# ---------------------------------------------------------------------------
+# Parsing and binding logic (unchanged)
+# ---------------------------------------------------------------------------
+
 STRING_TYPES = {"VARCHAR", "CHAR", "LONGVARCHAR"}
 NUMERIC_TYPES = {"INTEGER", "BIGINT", "DECIMAL", "DOUBLE"}
 BOOLEAN_TYPES = {"BOOLEAN"}
 DATE_TYPES = {"DATE", "TIMESTAMP"}
 
+
 class Parameter(dict):
+    """Container for a bound parameter."""
+
     index: int
     type: str
     original: str
     normalized: str
     error: str | None
+
 
 def parse_logs(text: str) -> Tuple[List[Parameter], List[str]]:
     pattern = re.compile(r"binding parameter \[(\d+)\] as \[(\w+)\] - \[(.*?)\]")
@@ -79,16 +103,21 @@ def parse_logs(text: str) -> Tuple[List[Parameter], List[str]]:
         idx_int = int(idx)
         typ_upper = typ.upper()
         if idx_int in params:
-            warnings.append(f"Duplicate parameter index {idx_int}; ignoring subsequent value.")
+            warnings.append(
+                f"Duplicate parameter index {idx_int}; ignoring subsequent value."
+            )
             continue
-        params[idx_int] = Parameter(index=idx_int, type=typ_upper, original=value, normalized="", error=None)
+        params[idx_int] = Parameter(
+            index=idx_int, type=typ_upper, original=value, normalized="", error=None
+        )
     ordered_indexes = sorted(params.keys())
     if ordered_indexes and ordered_indexes != list(range(1, len(ordered_indexes) + 1)):
         warnings.append("Parameter indexes are not contiguous starting at 1.")
     ordered_params = [params[i] for i in ordered_indexes]
     return ordered_params, warnings
 
-def normalize(param: Parameter, diagnostics: List[str]) -> None:
+
+def normalize(param: Parameter, diagnostics: List[str], expand_in: bool) -> None:
     typ = param["type"]
     val = param["original"]
     if typ in BOOLEAN_TYPES:
@@ -100,7 +129,7 @@ def normalize(param: Parameter, diagnostics: List[str]) -> None:
         else:
             param["error"] = f"Invalid boolean value '{val}'"
     elif typ in STRING_TYPES:
-        if "," in val:
+        if expand_in and "," in val:
             parts = [p.strip() for p in val.split(",")]
             quoted = ["'" + p.replace("'", "''") + "'" for p in parts]
             param["normalized"] = "(" + ",".join(quoted) + ")"
@@ -118,19 +147,21 @@ def normalize(param: Parameter, diagnostics: List[str]) -> None:
         param["normalized"] = val
         diagnostics.append(f"Unknown JDBC type {typ}; inserted raw value.")
 
+
 def bind_sql(sql: str, params: List[Parameter]) -> str:
     bound = sql
     for p in params:
         bound = bound.replace("?", p["normalized"], 1)
     return bound
 
-def process(sql: str, logs: str):
+
+def process(sql: str, logs: str, expand_in: bool):
     diagnostics: List[str] = []
     params, warnings = parse_logs(logs)
     diagnostics.extend(warnings)
     placeholders = sql.count("?")
     for p in params:
-        normalize(p, diagnostics)
+        normalize(p, diagnostics, expand_in)
     errors = [p for p in params if p["error"]]
     if errors:
         for p in errors:
@@ -151,107 +182,273 @@ def process(sql: str, logs: str):
         "diagnostics": diagnostics,
     }
 
-TEMPLATE = """<!doctype html>
-<html>
-<head>
-<title>Hibernate Bind Visualizer</title>
-<style>
-body { font-family: Arial, sans-serif; margin: 1rem; }
-.inputs { display: flex; gap: 1rem; }
-.inputs textarea { width: 100%; height: 300px; }
-.buttons { margin-top: 0.5rem; }
-button { margin-right: 0.5rem; }
-</style>
-</head>
-<body>
-<h1>Hibernate Bind Visualizer</h1>
-<form id="bindForm" method=post>
-<div class="inputs">
-<div>
-<label for="sql">SQL</label><br>
-<textarea id="sql" name=sql>{{ sql }}</textarea>
-</div>
-<div>
-<label for="logs">Logs</label><br>
-<textarea id="logs" name=logs>{{ logs }}</textarea>
-</div>
-</div>
-<input type="hidden" id="actionField" name="action">
-<div class="buttons">
-<button type="submit" onclick="document.getElementById('actionField').value='parse'">Parse &amp; Bind</button>
-<button type="submit" onclick="document.getElementById('actionField').value='reset'">Reset</button>
-<button type="submit" onclick="document.getElementById('actionField').value='example'">Load Example</button>
-</div>
-</form>
-{% if results %}
-<h2>Parameter Table</h2>
-<table border=1>
-<tr><th>#</th><th>JDBC Type</th><th>Original</th><th>Normalized</th></tr>
-{% for p in results['params'] %}
-<tr>
-<td>{{p['index']}}</td><td>{{p['type']}}</td><td>{{p['original']}}</td><td>{% if p['error'] %}ERROR: {{p['error']}}{% else %}{{p['normalized']}}{% endif %}</td>
-</tr>
-{% endfor %}
-</table>
-<h2>Final SQL</h2>
-{% if results['final_sql'] %}
-<pre>{{results['final_sql']}}</pre>
-<form method=post action="/download">
-<input type=hidden name=sql value="{{results['final_sql']}}">
-<button type=submit>Download SQL</button>
-</form>
-{% else %}
-<p>Final SQL unavailable due to errors.</p>
-{% endif %}
-<h2>Diagnostics</h2>
-<p>Placeholders: {{results['placeholders']}}, Params: {{results['param_count']}}</p>
-<ul>
-{% for msg in results['diagnostics'] %}
-<li>{{msg}}</li>
-{% endfor %}
-</ul>
-{% endif %}
-<script>
-document.addEventListener('DOMContentLoaded', () => {
-  const form = document.getElementById('bindForm');
-  const actionField = document.getElementById('actionField');
-  const sql = document.getElementById('sql');
-  const logs = document.getElementById('logs');
-  function autoParse() {
-    if (sql.value.trim() && logs.value.trim()) {
-      actionField.value = 'parse';
-      form.submit();
+
+# ---------------------------------------------------------------------------
+# UI helpers
+# ---------------------------------------------------------------------------
+
+def init_state() -> None:
+    defaults = {
+        "sql": "",
+        "logs": "",
+        "auto_parse": True,
+        "expand_in": True,
+        "theme_mode": "auto",
+        "results": None,
+        "force_parse": False,
+        "sql_font": 14,
     }
-  }
-  sql.addEventListener('paste', () => setTimeout(autoParse, 0));
-  logs.addEventListener('paste', () => setTimeout(autoParse, 0));
-});
-</script>
-</body>
-</html>
-"""
+    for k, v in defaults.items():
+        st.session_state.setdefault(k, v)
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    sql = request.form.get('sql', '')
-    logs = request.form.get('logs', '')
-    action = request.form.get('action')
-    results = None
-    if request.method == 'POST':
-        if action == 'parse':
-            results = process(sql, logs)
-        elif action == 'example':
-            sql = EXAMPLE_SQL
-            logs = EXAMPLE_LOGS
-        elif action == 'reset':
-            sql = ''
-            logs = ''
-    return render_template_string(TEMPLATE, sql=sql, logs=logs, results=results)
 
-@app.post('/download')
-def download():
-    sql = request.form.get('sql', '')
-    return Response(sql, mimetype='text/sql', headers={'Content-Disposition': 'attachment; filename=bound.sql'})
+def load_example() -> None:
+    st.session_state.sql = EXAMPLE_SQL
+    st.session_state.logs = EXAMPLE_LOGS
+    st.session_state.force_parse = True
 
-if __name__ == '__main__':
-    app.run(debug=True)
+
+def reset_all() -> None:
+    st.session_state.sql = ""
+    st.session_state.logs = ""
+    st.session_state.results = None
+
+
+def trigger_parse() -> None:
+    st.session_state.force_parse = True
+
+
+def copy_button(label: str, text: str, key: str) -> None:
+    components.html(
+        f"""
+        <button onclick="navigator.clipboard.writeText({json.dumps(text)})" class='copy-btn'>
+            {label}
+        </button>
+        <style>.copy-btn {{ padding:0.25rem 0.5rem; margin-top:0.5rem; }}</style>
+        """,
+        height=40,
+    )
+
+
+def inject_table_copy_script() -> None:
+    components.html(
+        """
+        <script>
+        const tables = parent.document.querySelectorAll('div[data-testid="stDataFrame"] table');
+        const table = tables[tables.length - 1];
+        if (table) {
+            table.querySelectorAll('td').forEach(td => {
+                td.style.cursor = 'pointer';
+                td.title = 'Click to copy';
+                td.addEventListener('click', () => navigator.clipboard.writeText(td.innerText));
+            });
+        }
+        </script>
+        """,
+        height=0,
+    )
+
+
+def keyboard_shortcuts_script() -> None:
+    components.html(
+        """
+        <script>
+        document.addEventListener('keydown', function(e) {
+            const mod = e.metaKey || e.ctrlKey;
+            if (mod && e.key === 'Enter') {
+                [...parent.document.querySelectorAll('button')]
+                  .find(b => b.innerText === 'Parse & Bind')?.click();
+            }
+            if (mod && e.key.toLowerCase() === 'l') {
+                [...parent.document.querySelectorAll('button')]
+                  .find(b => b.innerText === 'Load Example')?.click();
+            }
+            if (e.key === 'Escape') {
+                [...parent.document.querySelectorAll('button')]
+                  .find(b => b.innerText === 'Reset')?.click();
+            }
+        });
+        </script>
+        """,
+        height=0,
+    )
+
+
+def apply_theme() -> None:
+    mode = st.session_state.get("theme_mode", "auto")
+    if mode == "dark":
+        st.markdown("""<style>body{background-color:#0e1117;color:#fafafa;}</style>""", unsafe_allow_html=True)
+    elif mode == "light":
+        st.markdown("""<style>body{background-color:white;color:black;}</style>""", unsafe_allow_html=True)
+    else:
+        components.html(
+            """
+            <script>
+            const theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            const msg = {'theme': theme};
+            window.parent.postMessage(msg, '*');
+            </script>
+            """,
+            height=0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Layout sections
+# ---------------------------------------------------------------------------
+
+def top_bar(final_sql: str | None) -> None:
+    st.markdown(
+        """
+        <style>
+        .top-bar {display:flex;justify-content:space-between;align-items:center;
+                  padding:0.5rem 0; border-bottom:1px solid #ddd;}
+        .top-title {font-size:1.3rem; font-weight:600;}
+        .actions button {margin-left:0.25rem;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.container():
+        col1, col2 = st.columns([3, 2])
+        with col1:
+            st.markdown(
+                "<div class='top-title'>Hibernate Bind Visualizer<br><span style='font-size:0.8rem;font-weight:400;'>Parse Hibernate TRACE logs</span></div>",
+                unsafe_allow_html=True,
+            )
+        with col2:
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.button("Load Example", on_click=load_example)
+            c2.button("Parse & Bind", on_click=trigger_parse)
+            c3.button("Reset", on_click=reset_all)
+            c4.download_button(
+                "Download .sql",
+                data=final_sql or "",
+                file_name="bound.sql",
+                disabled=not final_sql,
+            )
+            c5.selectbox(
+                "Theme",
+                ["Auto", "Light", "Dark"],
+                key="theme_mode",
+                label_visibility="collapsed",
+            )
+
+
+def input_section() -> None:
+    with st.container():
+        st.markdown("#### SQL with ? placeholders")
+        st.text_area(
+            "SQL",
+            key="sql",
+            height=300,
+            placeholder="Paste SQL with ? placeholders",
+        )
+    with st.container():
+        st.markdown("#### Hibernate TRACE logs")
+        st.text_area(
+            "Logs",
+            key="logs",
+            height=300,
+            placeholder="Paste TRACE logs",
+        )
+    st.checkbox("Auto-parse", key="auto_parse")
+    st.checkbox("Expand CSV in IN (?)", key="expand_in")
+
+
+def results_section(results: dict | None) -> None:
+    if not results:
+        st.info("Provide SQL and TRACE logs to see results.")
+        return
+
+    tabs = st.tabs(["Params", "Final SQL", "Diagnostics"])
+
+    with tabs[0]:
+        data = [
+            {
+                "#": p["index"],
+                "JDBC Type": p["type"],
+                "Original": "''" if p["original"] == "" else p["original"],
+                "Normalized": p["normalized"],
+                "Notes": p["error"] or "",
+            }
+            for p in results["params"]
+        ]
+        df = pd.DataFrame(data)
+        st.dataframe(df, use_container_width=True)
+        inject_table_copy_script()
+
+    with tabs[1]:
+        if results["final_sql"]:
+            st.slider("Font size", 8, 32, key="sql_font")
+            st.markdown(
+                f"<pre style='font-family:monospace;font-size:{st.session_state.sql_font}px;'>{results['final_sql']}</pre>",
+                unsafe_allow_html=True,
+            )
+            copy_button("Copy", results["final_sql"], "copy-sql")
+        else:
+            st.warning("Final SQL unavailable due to errors.")
+
+    with tabs[2]:
+        c1, c2 = st.columns(2)
+        c1.metric("Placeholders", results["placeholders"])
+        c2.metric("Params", results["param_count"])
+        if results["diagnostics"]:
+            for msg in results["diagnostics"]:
+                st.write(f"- {msg}")
+        else:
+            st.success("No diagnostics")
+
+
+def how_it_works() -> None:
+    with st.expander("How it works"):
+        st.markdown(
+            """
+            - `?=1` bypasses conditions when the parameter is `1`.
+            - `LIKE '%'||?||'%'` shows how wildcard searches are constructed.
+            - `IN (?)` placeholders can expand CSV values when *Expand CSV in IN (?)* is enabled.
+            """
+        )
+
+
+# ---------------------------------------------------------------------------
+# Main app
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    st.set_page_config(page_title="Hibernate Bind Visualizer", layout="wide")
+    init_state()
+    apply_theme()
+
+    if st.session_state.auto_parse or st.session_state.force_parse:
+        if st.session_state.sql.strip() and st.session_state.logs.strip():
+            st.session_state.results = process(
+                st.session_state.sql,
+                st.session_state.logs,
+                st.session_state.expand_in,
+            )
+            if st.session_state.results["final_sql"]:
+                st.toast("Parse & Bind successful", icon="✅")
+            else:
+                st.toast("Check diagnostics for issues", icon="⚠️")
+        st.session_state.force_parse = False
+
+    top_bar(
+        st.session_state.results["final_sql"]
+        if st.session_state.results
+        else None
+    )
+
+    left, right = st.columns([1, 1])
+    with left:
+        input_section()
+    with right:
+        results_section(st.session_state.results)
+
+    how_it_works()
+    keyboard_shortcuts_script()
+
+
+if __name__ == "__main__":
+    main()
+
