@@ -1,12 +1,12 @@
 # hibernate-bind-visualizer-app
 
-A Streamlit tool to visualize bound SQL queries from Hibernate TRACE logs.
+A Flask-powered tool to visualize bound SQL queries from Hibernate TRACE logs.
 
 ## Local development
 
 ```bash
 pip install -r requirements.txt
-streamlit run hibernate_bind_visualizer_app.py
+flask --app hibernate_bind_visualizer_app:app run
 ```
 
 ## Deployment on Railway
@@ -14,7 +14,7 @@ streamlit run hibernate_bind_visualizer_app.py
 This repo includes a `Procfile` so Railway can launch the app:
 
 ```
-web: streamlit run hibernate_bind_visualizer_app.py --server.port $PORT --server.address 0.0.0.0
+web: flask --app hibernate_bind_visualizer_app:app run --host=0.0.0.0 --port $PORT
 ```
 
 To deploy:

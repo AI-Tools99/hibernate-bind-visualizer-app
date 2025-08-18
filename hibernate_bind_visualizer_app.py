@@ -1,21 +1,10 @@
-import streamlit as st
+from __future__ import annotations
+
 import re
 from typing import List, Tuple
+from flask import Flask, request, render_template_string, Response
 
-st.set_page_config(page_title="Hibernate Bind Visualizer", layout="wide")
-
-st.title("Hibernate Bind Visualizer")
-
-st.markdown(
-    """
-    **How to use**
-
-    1. Paste the SQL with `?` placeholders in the left box.
-    2. Paste Hibernate TRACE log lines on the right (plain text or JSON lines).
-    3. Click **Parse & Bind** to render the final SQL and parameter table.
-    4. Use **Reset** to clear the inputs. **Load Example** fills sample data.
-    """
-)
+app = Flask(__name__)
 
 EXAMPLE_SQL = """select
     e2_0."event_id",
@@ -69,31 +58,10 @@ EXAMPLE_LOGS = """{"message":"binding parameter [1] as [BOOLEAN] - [true]"}
 {"message":"binding parameter [11] as [INTEGER] - [0]"}
 {"message":"binding parameter [12] as [INTEGER] - [50]"}"""
 
-if "sql" not in st.session_state:
-    st.session_state.sql = ""
-if "logs" not in st.session_state:
-    st.session_state.logs = ""
-if "results" not in st.session_state:
-    st.session_state.results = None
-
-
-def load_example():
-    st.session_state.sql = EXAMPLE_SQL
-    st.session_state.logs = EXAMPLE_LOGS
-    st.session_state.results = None
-
-
-def reset():
-    st.session_state.sql = ""
-    st.session_state.logs = ""
-    st.session_state.results = None
-
-
 STRING_TYPES = {"VARCHAR", "CHAR", "LONGVARCHAR"}
 NUMERIC_TYPES = {"INTEGER", "BIGINT", "DECIMAL", "DOUBLE"}
 BOOLEAN_TYPES = {"BOOLEAN"}
 DATE_TYPES = {"DATE", "TIMESTAMP"}
-
 
 class Parameter(dict):
     index: int
@@ -101,7 +69,6 @@ class Parameter(dict):
     original: str
     normalized: str
     error: str | None
-
 
 def parse_logs(text: str) -> Tuple[List[Parameter], List[str]]:
     pattern = re.compile(r"binding parameter \[(\d+)\] as \[(\w+)\] - \[(.*?)\]")
@@ -120,7 +87,6 @@ def parse_logs(text: str) -> Tuple[List[Parameter], List[str]]:
         warnings.append("Parameter indexes are not contiguous starting at 1.")
     ordered_params = [params[i] for i in ordered_indexes]
     return ordered_params, warnings
-
 
 def normalize(param: Parameter, diagnostics: List[str]) -> None:
     typ = param["type"]
@@ -152,13 +118,11 @@ def normalize(param: Parameter, diagnostics: List[str]) -> None:
         param["normalized"] = val
         diagnostics.append(f"Unknown JDBC type {typ}; inserted raw value.")
 
-
 def bind_sql(sql: str, params: List[Parameter]) -> str:
     bound = sql
     for p in params:
         bound = bound.replace("?", p["normalized"], 1)
     return bound
-
 
 def process(sql: str, logs: str):
     diagnostics: List[str] = []
@@ -187,56 +151,67 @@ def process(sql: str, logs: str):
         "diagnostics": diagnostics,
     }
 
+TEMPLATE = """<!doctype html>
+<title>Hibernate Bind Visualizer</title>
+<h1>Hibernate Bind Visualizer</h1>
+<form method=post>
+<textarea name=sql rows=20 cols=60>{{ sql }}</textarea>
+<textarea name=logs rows=20 cols=60>{{ logs }}</textarea><br>
+<button name=action value=parse>Parse &amp; Bind</button>
+<button name=action value=reset>Reset</button>
+<button name=action value=example>Load Example</button>
+</form>
+{% if results %}
+<h2>Parameter Table</h2>
+<table border=1>
+<tr><th>#</th><th>JDBC Type</th><th>Original</th><th>Normalized</th></tr>
+{% for p in results['params'] %}
+<tr>
+<td>{{p['index']}}</td><td>{{p['type']}}</td><td>{{p['original']}}</td><td>{% if p['error'] %}ERROR: {{p['error']}}{% else %}{{p['normalized']}}{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+<h2>Final SQL</h2>
+{% if results['final_sql'] %}
+<pre>{{results['final_sql']}}</pre>
+<form method=post action="/download">
+<input type=hidden name=sql value="{{results['final_sql']}}">
+<button type=submit>Download SQL</button>
+</form>
+{% else %}
+<p>Final SQL unavailable due to errors.</p>
+{% endif %}
+<h2>Diagnostics</h2>
+<p>Placeholders: {{results['placeholders']}}, Params: {{results['param_count']}}</p>
+<ul>
+{% for msg in results['diagnostics'] %}
+<li>{{msg}}</li>
+{% endfor %}
+</ul>
+{% endif %}
+"""
 
-col1, col2 = st.columns(2)
-with col1:
-    st.session_state.sql = st.text_area(
-        "SQL with ? placeholders", value=st.session_state.sql, height=400
-    )
-with col2:
-    st.session_state.logs = st.text_area(
-        "Hibernate TRACE logs", value=st.session_state.logs, height=400
-    )
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    sql = request.form.get('sql', '')
+    logs = request.form.get('logs', '')
+    action = request.form.get('action')
+    results = None
+    if request.method == 'POST':
+        if action == 'parse':
+            results = process(sql, logs)
+        elif action == 'example':
+            sql = EXAMPLE_SQL
+            logs = EXAMPLE_LOGS
+        elif action == 'reset':
+            sql = ''
+            logs = ''
+    return render_template_string(TEMPLATE, sql=sql, logs=logs, results=results)
 
-btn_cols = st.columns([1, 1, 1])
-with btn_cols[0]:
-    if st.button("Parse & Bind"):
-        st.session_state.results = process(st.session_state.sql, st.session_state.logs)
-with btn_cols[1]:
-    st.button("Reset", on_click=reset)
-with btn_cols[2]:
-    st.button("Load Example", on_click=load_example)
+@app.post('/download')
+def download():
+    sql = request.form.get('sql', '')
+    return Response(sql, mimetype='text/sql', headers={'Content-Disposition': 'attachment; filename=bound.sql'})
 
-results = st.session_state.results
-if results:
-    st.subheader("Parameter Table")
-    table_rows = [
-        {
-            "#": p["index"],
-            "JDBC Type": p["type"],
-            "Original": p["original"],
-            "Normalized": p["normalized"] if not p["error"] else f"ERROR: {p['error']}",
-        }
-        for p in results["params"]
-    ]
-    st.table(table_rows)
-
-    st.subheader("Final SQL")
-    if results["final_sql"] is not None:
-        st.code(results["final_sql"])
-        st.download_button(
-            "Download SQL", results["final_sql"], file_name="bound.sql", mime="text/sql"
-        )
-    else:
-        st.write("Final SQL unavailable due to errors.")
-
-    st.subheader("Diagnostics")
-    st.write(
-        f"Placeholders: {results['placeholders']}, Params: {results['param_count']}"
-    )
-    for msg in results["diagnostics"]:
-        st.write("- " + msg)
-
-st.markdown("---")
-st.markdown("### How to Run")
-st.code("pip install streamlit\nstreamlit run hibernate_bind_visualizer_app.py", language="bash")
+if __name__ == '__main__':
+    app.run(debug=True)
