@@ -152,14 +152,36 @@ def process(sql: str, logs: str):
     }
 
 TEMPLATE = """<!doctype html>
+<html>
+<head>
 <title>Hibernate Bind Visualizer</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 1rem; }
+.inputs { display: flex; gap: 1rem; }
+.inputs textarea { width: 100%; height: 300px; }
+.buttons { margin-top: 0.5rem; }
+button { margin-right: 0.5rem; }
+</style>
+</head>
+<body>
 <h1>Hibernate Bind Visualizer</h1>
-<form method=post>
-<textarea name=sql rows=20 cols=60>{{ sql }}</textarea>
-<textarea name=logs rows=20 cols=60>{{ logs }}</textarea><br>
-<button name=action value=parse>Parse &amp; Bind</button>
-<button name=action value=reset>Reset</button>
-<button name=action value=example>Load Example</button>
+<form id="bindForm" method=post>
+<div class="inputs">
+<div>
+<label for="sql">SQL</label><br>
+<textarea id="sql" name=sql>{{ sql }}</textarea>
+</div>
+<div>
+<label for="logs">Logs</label><br>
+<textarea id="logs" name=logs>{{ logs }}</textarea>
+</div>
+</div>
+<input type="hidden" id="actionField" name="action">
+<div class="buttons">
+<button type="submit" onclick="document.getElementById('actionField').value='parse'">Parse &amp; Bind</button>
+<button type="submit" onclick="document.getElementById('actionField').value='reset'">Reset</button>
+<button type="submit" onclick="document.getElementById('actionField').value='example'">Load Example</button>
+</div>
 </form>
 {% if results %}
 <h2>Parameter Table</h2>
@@ -189,6 +211,24 @@ TEMPLATE = """<!doctype html>
 {% endfor %}
 </ul>
 {% endif %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const form = document.getElementById('bindForm');
+  const actionField = document.getElementById('actionField');
+  const sql = document.getElementById('sql');
+  const logs = document.getElementById('logs');
+  function autoParse() {
+    if (sql.value.trim() && logs.value.trim()) {
+      actionField.value = 'parse';
+      form.submit();
+    }
+  }
+  sql.addEventListener('paste', () => setTimeout(autoParse, 0));
+  logs.addEventListener('paste', () => setTimeout(autoParse, 0));
+});
+</script>
+</body>
+</html>
 """
 
 @app.route('/', methods=['GET', 'POST'])
